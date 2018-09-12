@@ -23,7 +23,7 @@ description:
 version_added: "2.5"
 options:
   state:
-    choices: ['planned', 'present', 'absent']
+    choices: ['planned', 'present', 'absent','outputs"]
     description:
       - Goal state of given stage/project
     required: false
@@ -114,6 +114,10 @@ EXAMPLES = """
 - terraform:
     project_path: '{{ project_dir }}'
     state: present
+
+- terraform:
+    project_path: '{{ project_dir }}'
+    state: outputs
 
 # Define the backend configuration at init
 - terraform:
@@ -357,6 +361,9 @@ def main():
         command.append(plan_file)
     elif plan_file and not os.path.exists(plan_file):
         module.fail_json(msg='Could not find plan_file "{0}", check the path and try again.'.format(plan_file))
+    elif state == "outputs":
+        needs_application = False
+        changed = False
     else:
         plan_file, needs_application = build_plan(command[0], project_path, variables_args, state_file, module.params.get('targets'), plan_file)
         command.append(plan_file)
