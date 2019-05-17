@@ -52,20 +52,26 @@ RETURN = '''
 '''
 
 import yaml
-import os
 import tempfile
 
 from ansible.module_utils.basic import AnsibleModule
 
 module = None
 
-# TODO
-def get_latest_version(command, chart_name):
-    return None
 
-# TODO
-def parse_name_version(release_status, ):
-    return None, None
+# get helm Version
+def get_client_version(command):
+    version_command = command + " version --client --template '{{ .Client.SemVer }}'"
+
+    rc, out, err = module.run_command(version_command)
+
+    if rc != 0:
+        module.fail_json(
+            msg="Failure when executing Helm command. Exited {0}.\nstdout: {1}\nstderr: {2}".format(rc, out, err),
+            command=' '.join(version_command)
+        )
+
+    return out
 
 
 # Get Values from deployed release
@@ -118,13 +124,10 @@ def deploy(command,
            repo_url, repo_username, repo_password):
     deploy_command = command + " upgrade -i "     # install/upgrade
 
-    #TODO:  check is  url
-    is_chart_reference = os.path.exists(release_name)
-
-    if chart_version is not None and is_chart_reference is True:
+    if chart_version is not None:
         deploy_command.append(" --version=" + chart_version)
 
-    if repo_url is not None and is_chart_reference is True:
+    if repo_url is not None:
         deploy_command.append(" --repo=" + repo_url)
         if repo_username is not None and repo_password is not None:
             deploy_command.append(" --username=" + repo_username)
@@ -179,23 +182,23 @@ def main():
     module = AnsibleModule(
         argument_spec=dict(
             binary_path=dict(type='path'),
-            chart_name=dict(type='str', required=True),  # can be chart name, archive, directory or url
-            chart_version=dict(type='str'),              # only when is a chart name !
+            chart_name=dict(type='str', required=True),
+            chart_version=dict(type='str'),
+            release_name=dict(type='str', required=True, aliases=['name']),
+            release_namespace=dict(type='str', default='default', aliases=['namespace']),
+            release_state=dict(default='present', choices=['present', 'absent'], aliases=['state']),
+            release_values=dict(type='dict', default={}, aliases=['values']),
             repo_url=dict(type='str', required=True),
             repo_username=dict(type='str'),
             repo_password=dict(type='str'),
+            tiller_host=dict(type='str'),
             tiller_namespace=dict(type='str', default='default'),
-            release_name=dict(type='str', required=True, aliases=['name']), # release name
-            release_namespace=dict(type='str', default='default', aliases=['namespace']), # target namespaces
-            release_state=dict(default='present', choices=['present', 'absent'], aliases=['state']),
-            release_values=dict(type='dict', default={}, aliases=['values']),
         ),
     )
 
     bin_path          = module.params.get('binary_path')
     chart_name        = module.params.get('chart_name')
     chart_version     = module.params.get('chart_version')
-    tiller_namespace  = module.params.get('tiller_namespace')
     release_name      = module.params.get('release_name')
     release_namespace = module.params.get('release_namespace')
     release_state     = module.params.get('release_state')
@@ -203,28 +206,34 @@ def main():
     repo_url          =  module.params.get('repo_url')
     repo_username     =  module.params.get('repo_username')
     repo_password     =  module.params.get('repo_password')
+    tiller_namespace  = module.params.get('tiller_namespace')
+    tiller_host       = module.params.get('tiller_host')
 
     if bin_path is not None:
         command = [bin_path]
     else:
         command = [module.get_bin_path('helm', required=True)]
 
-    # global args
-    command.append(" --tiller-namespace=" + tiller_namespace)
+    helm_version = get_client_version(command)
+    if helm_version.startswith("v2."):
+        if tiller_host is not None:
+            command.append(" --tiller-namespace=" + tiller_namespace)
+        else:
+            command.append(" --host=" + tiller_namespace)
 
     release_status = status(command, release_name)
-    release_status['Chart_name'], release_status['Chart_version'] = parse_name_version(release_status)
 
     if release_state == "present":
-        if release_status is None: # Not installed
+        if release_status is None:  # Not installed
             out, err = deploy(command, release_namespace, release_name, release_values, chart_name, chart_version,
                               repo_url, repo_username, repo_password)
             changed = True
         elif release_namespace != release_status['Namespace']:
-            module.fail_json(msg="Target Namespace can't be changed on deployed chart ! Need to destroy and recreate it")
-        elif chart_name != release_status["Chart_name"]:
-            module.fail_json(msg="Chart Name can't be changed on deployed chart ! Need to destroy and recreate")
-        elif release_values != release_status['Values'] and chart_version != release_status["Chart_version"]:
+            module.fail_json(
+                msg="Target Namespace can't be changed on deployed chart ! Need to destroy and recreate it"
+            )
+        elif release_values != release_status['Values'] \
+                and (chart_name + '-' + chart_version) != release_status["Chart"]:
             out, err = deploy(command, release_namespace, release_name, release_values, chart_name, chart_version,
                               repo_url, repo_username, repo_password)
             changed = True
