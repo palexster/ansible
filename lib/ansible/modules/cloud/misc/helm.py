@@ -58,6 +58,15 @@ from ansible.module_utils.basic import AnsibleModule
 
 module = None
 
+# TODO:
+#   * dry-run        => template for upgrade
+#   * state          => template
+#   * ansible output => status
+#   * helm status != status function
+#   * doc/example
+#   * upgrade/rollback
+#   * wait and deploy fail
+
 
 # get helm Version
 def get_client_version(command):
@@ -96,8 +105,8 @@ def get_release(status, release_name):
     return None
 
 
-# Get Release status from deployed release
-def status(command, release_name):
+# Get Release state from deployed release
+def get_release_state(command, release_name):
     list_command = command + " list --output=yaml"
     rc, out, err = module.run_command(list_command)
 
@@ -221,7 +230,7 @@ def main():
         else:
             command.append(" --host=" + tiller_namespace)
 
-    release_status = status(command, release_name)
+    release_status = get_release_state(command, release_name)
 
     if release_state == "present":
         if release_status is None:  # Not installed
