@@ -1,11 +1,12 @@
 #!/usr/bin/python
-# (c) 2016, Flavio Percoco <flavio@redhat.com>
-#
+# -*- coding: utf-8 -*-
+
+# Copyright: Ansible Project
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
 from __future__ import absolute_import, division, print_function
-__metaclass__ = type
 
+__metaclass__ = type
 
 ANSIBLE_METADATA = {'metadata_version': '1.1',
                     'status': ['preview'],
@@ -14,23 +15,27 @@ ANSIBLE_METADATA = {'metadata_version': '1.1',
 DOCUMENTATION = '''
 ---
 module: helm
-short_description: Manages Kubernetes packages with the Helm package manager
-version_added: "2.4"
-author: "Flavio Percoco (@flaper87)"
+short_description: Manage a Helm deployment (and template)
 description:
-   - Install, upgrade, delete and list packages with the Helm package manager.
-requirements:
-  - "pyhelm"
-  - "grpcio"
+  - Manage the atomic host platform.
+  - Rebooting of Atomic host platform should be done outside this module.
+version_added: "2.8"
+author:
+  - Lucas Boisserie (@krsacme)
+notes:
+  - To just run a `helm template`, use check mode
+requirements: ["helm"]
 options:
-  host:
+  state:
+    choices: ['present', 'absent']
+    description: ''
+    required: false
+    default: present 
+  binary_path:
     description:
-      - Tiller's server host.
-    default: "localhost"
-  port:
-    description:
-      - Tiller's server port.
-    default: 44134
+      - The path of a terraform binary to use, relative to the 'service_path'
+        unless you supply an absolute path.
+    required: false
   namespace:
     description:
       - Kubernetes namespace where the chart should be installed.
@@ -38,169 +43,197 @@ options:
   name:
     description:
       - Release name to manage.
-  state:
-    description:
-      - Whether to install C(present), remove C(absent), or purge C(purged) a package.
-    choices: ['absent', 'purged', 'present']
-    default: "present"
-  chart:
-    description: |
-      A map describing the chart to install. See examples for available options.
-    default: {}
-  values:
-    description:
-      - A map of value options for the chart.
-    default: {}
-  disable_hooks:
-    description:
-      - Whether to disable hooks during the uninstall process.
-    type: bool
-    default: 'no'
 '''
-
-RETURN = ''' # '''
 
 EXAMPLES = '''
-- name: Install helm chart
-  helm:
-    host: localhost
-    chart:
-      name: memcached
-      version: 0.4.0
-      source:
-        type: repo
-        location: https://kubernetes-charts.storage.googleapis.com
-    state: present
-    name: my-memcached
-    namespace: default
-
-- name: Uninstall helm chart
-  helm:
-    host: localhost
-    state: absent
-    name: my-memcached
-
-- name: Install helm chart from a git repo
-  helm:
-    host: localhost
-    chart:
-      source:
-        type: git
-        location: https://github.com/user/helm-chart.git
-    state: present
-    name: my-example
-    namespace: default
-
-- name: Install helm chart from a git repo specifying path
-  helm:
-    host: localhost
-    chart:
-      source:
-        type: git
-        location: https://github.com/helm/charts.git
-        path: stable/memcached
-    state: present
-    name: my-memcached
-    namespace: default
 '''
 
-try:
-    import grpc
-    from pyhelm import tiller
-    from pyhelm import chartbuilder
-    HAS_PYHELM = True
-except ImportError as exc:
-    HAS_PYHELM = False
+RETURN = '''
+'''
+
+import yaml
+import os
+import tempfile
 
 from ansible.module_utils.basic import AnsibleModule
 
+module = None
 
-def install(module, tserver):
-    changed = False
-    params = module.params
-    name = params['name']
-    values = params['values']
-    chart = module.params['chart']
-    namespace = module.params['namespace']
+# TODO
+def get_latest_version(command, chart_name):
+    return None
 
-    chartb = chartbuilder.ChartBuilder(chart)
-    r_matches = (x for x in tserver.list_releases()
-                 if x.name == name and x.namespace == namespace)
-    installed_release = next(r_matches, None)
-    if installed_release:
-        if installed_release.chart.metadata.version != chart['version']:
-            tserver.update_release(chartb.get_helm_chart(), False,
-                                   namespace, name=name, values=values)
-            changed = True
+# TODO
+def parse_name_version(release_status, ):
+    return None, None
+
+
+# Get Values from deployed release
+def get_values(command, release_name):
+    get_command = command + " get values --output=yaml " + release_name
+    rc, out, err = module.run_command(get_command)
+
+    if rc != 0:
+        module.fail_json(
+            msg="Failure when executing Helm command. Exited {0}.\nstdout: {1}\nstderr: {2}".format(rc, out, err),
+            command=' '.join(get_command)
+        )
+
+    return yaml.safe_load(out)
+
+
+# Get Release from all deployed releases
+def get_release(status, release_name):
+    for release in status['Releases']:
+        if release['Name'] == release_name:
+            return release
+    return None
+
+
+# Get Release status from deployed release
+def status(command, release_name):
+    list_command = command + " list --output=yaml"
+    rc, out, err = module.run_command(list_command)
+
+    if rc != 0:
+        module.fail_json(
+            msg="Failure when executing Helm command. Exited {0}.\nstdout: {1}\nstderr: {2}".format(rc, out, err),
+            command=' '.join(list_command)
+        )
+
+    release = get_release(yaml.safe_load(out), release_name)
+
+    if release is None: # not install
+        return None
+
+    release['Values'] = get_values(command, release_name)
+
+    return release
+
+
+# Install/upgrade release chart
+def deploy(command,
+           release_namespace, release_name, release_value,
+           chart_name, chart_version,
+           repo_url, repo_username, repo_password):
+    deploy_command = command + " upgrade -i "     # install/upgrade
+
+    #TODO:  check is  url
+    is_chart_reference = os.path.exists(release_name)
+
+    if chart_version is not None and is_chart_reference is True:
+        deploy_command.append(" --version=" + chart_version)
+
+    if repo_url is not None and is_chart_reference is True:
+        deploy_command.append(" --repo=" + repo_url)
+        if repo_username is not None and repo_password is not None:
+            deploy_command.append(" --username=" + repo_username)
+            deploy_command.append(" --password=" + repo_password)
+
+    if release_value is not None:
+        f, path = tempfile.mkstemp(suffix='.yml')
+        yaml.dump(release_value, f)
+        deploy_command.append(" -f=" + path)
+
+    deploy_command.append(" --namespace=" + release_namespace + " " + release_name)
+    deploy_command.append(" " + release_name)
+    deploy_command.append(" " + chart_name)
+
+    rc, out, err = module.run_command(deploy_command)
+
+    if rc != 0:
+        module.fail_json(
+            msg="Failure when executing Helm command. Exited {0}.\nstdout: {1}\nstderr: {2}".format(rc, out, err),
+            command=' '.join(deploy_command)
+        )
+
+    return out
+
+
+# Delete release chart
+def delete(command, release_name, purge=True):
+    delete_command = command + " delete"
+
+    if purge:
+        delete_command.append(" --purge")
+
+    delete_command.append(" " + release_name)
+
+    rc, out, err = module.run_command(delete_command)
+
+    if rc == 1 and "Error: release: {0} not found".format(release_name) in err:
+        changed = False
+    elif rc != 0:
+        module.fail_json(
+            msg="Failure when executing Helm command. Exited {0}.\nstdout: {1}\nstderr: {2}".format(rc, out, err),
+            command=' '.join(delete_command)
+        )
     else:
-        tserver.install_release(chartb.get_helm_chart(), namespace,
-                                dry_run=False, name=name,
-                                values=values)
         changed = True
 
-    return dict(changed=changed)
-
-
-def delete(module, tserver, purge=False):
-    changed = False
-    params = module.params
-
-    if not module.params['name']:
-        module.fail_json(msg='Missing required field name')
-
-    name = module.params['name']
-    disable_hooks = params['disable_hooks']
-
-    try:
-        tserver.uninstall_release(name, disable_hooks, purge)
-        changed = True
-    except grpc._channel._Rendezvous as exc:
-        if 'not found' not in str(exc):
-            raise exc
-
-    return dict(changed=changed)
+    return changed, out
 
 
 def main():
-    """The main function."""
+    global module
     module = AnsibleModule(
         argument_spec=dict(
-            host=dict(type='str', default='localhost'),
-            port=dict(type='int', default=44134),
-            name=dict(type='str', default=''),
-            chart=dict(type='dict'),
-            state=dict(
-                choices=['absent', 'purged', 'present'],
-                default='present'
-            ),
-            # Install options
-            values=dict(type='dict'),
-            namespace=dict(type='str', default='default'),
-
-            # Uninstall options
-            disable_hooks=dict(type='bool', default=False),
+            binary_path=dict(type='path'),
+            chart_name=dict(type='str', required=True),  # can be chart name, archive, directory or url
+            chart_version=dict(type='str'),              # only when is a chart name !
+            repo_url=dict(type='str', required=True),
+            repo_username=dict(type='str'),
+            repo_password=dict(type='str'),
+            tiller_namespace=dict(type='str', default='default'),
+            release_name=dict(type='str', required=True, aliases=['name']), # release name
+            release_namespace=dict(type='str', default='default', aliases=['namespace']), # target namespaces
+            release_state=dict(default='present', choices=['present', 'absent'], aliases=['state']),
+            release_values=dict(type='dict', default={}, aliases=['values']),
         ),
-        supports_check_mode=True)
+    )
 
-    if not HAS_PYHELM:
-        module.fail_json(msg="Could not import the pyhelm python module. "
-                         "Please install `pyhelm` package.")
+    bin_path          = module.params.get('binary_path')
+    chart_name        = module.params.get('chart_name')
+    chart_version     = module.params.get('chart_version')
+    tiller_namespace  = module.params.get('tiller_namespace')
+    release_name      = module.params.get('release_name')
+    release_namespace = module.params.get('release_namespace')
+    release_state     = module.params.get('release_state')
+    release_values    = module.params.get('release_values')
+    repo_url          =  module.params.get('repo_url')
+    repo_username     =  module.params.get('repo_username')
+    repo_password     =  module.params.get('repo_password')
 
-    host = module.params['host']
-    port = module.params['port']
-    state = module.params['state']
-    tserver = tiller.Tiller(host, port)
+    if bin_path is not None:
+        command = [bin_path]
+    else:
+        command = [module.get_bin_path('helm', required=True)]
 
-    if state == 'present':
-        rst = install(module, tserver)
+    # global args
+    command.append(" --tiller-namespace=" + tiller_namespace)
 
-    if state in 'absent':
-        rst = delete(module, tserver)
+    release_status = status(command, release_name)
+    release_status['Chart_name'], release_status['Chart_version'] = parse_name_version(release_status)
 
-    if state in 'purged':
-        rst = delete(module, tserver, True)
+    if release_state == "present":
+        if release_status is None: # Not installed
+            out, err = deploy(command, release_namespace, release_name, release_values, chart_name, chart_version,
+                              repo_url, repo_username, repo_password)
+            changed = True
+        elif release_namespace != release_status['Namespace']:
+            module.fail_json(msg="Target Namespace can't be changed on deployed chart ! Need to destroy and recreate it")
+        elif chart_name != release_status["Chart_name"]:
+            module.fail_json(msg="Chart Name can't be changed on deployed chart ! Need to destroy and recreate")
+        elif release_values != release_status['Values'] and chart_version != release_status["Chart_version"]:
+            out, err = deploy(command, release_namespace, release_name, release_values, chart_name, chart_version,
+                              repo_url, repo_username, repo_password)
+            changed = True
+        else:
+            changed = False
+    else:  # release_state == "absent":
+        changed = delete(command, release_name)
 
-    module.exit_json(**rst)
+    module.exit_json(changed=changed, stdout=out, stderr=err,)
 
 
 if __name__ == '__main__':
