@@ -25,6 +25,15 @@ author:
 notes:
   - To just run a `helm template`, use check mode
 requirements: ["helm"]
+examples:
+    - name: "Install Grafana"
+      helm:
+        state: present
+        namespace: monitoring
+        name: grafana
+        binary_path: "/usr/bin/helm2"
+        chart_name: stable/grafana
+        repo_url: "https://kubernetes-charts.storage.googleapis.com"
 options:
   state:
     choices: ['present', 'absent']
@@ -43,6 +52,12 @@ options:
   name:
     description:
       - Release name to manage.
+  chart_name:
+    description:
+      - Chart name to target
+  repo_url:
+    description:
+      - Repository url to use to find charts
 '''
 
 EXAMPLES = '''
@@ -73,7 +88,11 @@ def get_client_version(command):
     version_command = command + " version --client --template '{{ .Client.SemVer }}'"
 
     rc, out, err = module.run_command(version_command)
+    if rc != 0:
+        #Fallback on Helm 3
+        version_command = command + " version --template '{{ .Version }}'"
 
+    rc, out, err = module.run_command(version_command)
     if rc != 0:
         module.fail_json(
             msg="Failure when executing Helm command. Exited {0}.\nstdout: {1}\nstderr: {2}".format(rc, out, err),
@@ -107,6 +126,7 @@ def get_release(status, release_name):
 
 # Get Release state from deployed release
 def get_release_state(command, release_name):
+    # (palexster): Helm3 does not have this feature so far - https://github.com/helm/helm/pull/5593/files
     list_command = command + " list --output=yaml"
     rc, out, err = module.run_command(list_command)
 
@@ -186,6 +206,12 @@ def delete(command, release_name, purge=True):
     return changed, out
 
 
+def generate_template(command, release_namespace, release_name, release_values, chart_name, chart_version, repo_url,
+                      repo_username, repo_password):
+    template_command = command + "template"
+    
+
+
 def main():
     global module
     module = AnsibleModule(
@@ -203,6 +229,7 @@ def main():
             tiller_host=dict(type='str'),
             tiller_namespace=dict(type='str', default='default'),
         ),
+        supports_check_mode=True,
     )
 
     bin_path          = module.params.get('binary_path')
@@ -219,9 +246,9 @@ def main():
     tiller_host       = module.params.get('tiller_host')
 
     if bin_path is not None:
-        command = [bin_path]
+        command = bin_path
     else:
-        command = [module.get_bin_path('helm', required=True)]
+        command = module.get_bin_path('helm', required=True)
 
     helm_version = get_client_version(command)
     if helm_version.startswith("v2."):
@@ -233,17 +260,26 @@ def main():
     release_status = get_release_state(command, release_name)
 
     if release_state == "present":
-        if release_status is None:  # Not installed
-            out, err = deploy(command, release_namespace, release_name, release_values, chart_name, chart_version,
+        if release_status is None: # Not installed
+            if module.check_mode:
+               out, err = generate_template(command, release_namespace, release_name, release_values, chart_name, chart_version,
+                              repo_url, repo_username, repo_password)
+            else:
+               out, err = deploy(command, release_namespace, release_name, release_values, chart_name, chart_version,
                               repo_url, repo_username, repo_password)
             changed = True
         elif release_namespace != release_status['Namespace']:
             module.fail_json(
-                msg="Target Namespace can't be changed on deployed chart ! Need to destroy and recreate it"
+                msg="Target Namespace can't be changed on deployed chart ! Need to destroy the release and recreate it"
             )
         elif release_values != release_status['Values'] \
                 and (chart_name + '-' + chart_version) != release_status["Chart"]:
-            out, err = deploy(command, release_namespace, release_name, release_values, chart_name, chart_version,
+            if module.check_mode:
+                out, err = generate_template(command, release_namespace, release_name, release_values, chart_name,
+                                             chart_version,
+                                             repo_url, repo_username, repo_password)
+            else:
+                out, err = deploy(command, release_namespace, release_name, release_values, chart_name, chart_version,
                               repo_url, repo_username, repo_password)
             changed = True
         else:
